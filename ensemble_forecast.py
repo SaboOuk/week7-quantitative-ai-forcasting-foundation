@@ -13,8 +13,38 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.chart import LineChart, Reference
 
-from forecast_system import VolumeForecaster
-from ml_forecast import MLForecaster
+from forecast_system import MLForecaster
+
+
+# Minimal Week-7 statistical forecaster (fallback)
+class VolumeForecaster:
+    """Simple statistical forecaster providing the
+    two methods used by the ensemble: moving_average_forecast
+    and exponential_smoothing. This avoids a hard dependency
+    on an external Week-7 module name.
+    """
+    def __init__(self, data_path: str):
+        if not os.path.exists(data_path):
+            raise FileNotFoundError(f"Data not found at: {data_path}")
+        self.data = pd.read_csv(data_path)
+        if "date" in self.data.columns:
+            self.data["date"] = pd.to_datetime(self.data["date"])
+            self.data = self.data.set_index("date")
+
+    def moving_average_forecast(self, window: int = 7):
+        """Return next-step moving average forecast and the series."""
+        if "volume" not in self.data.columns:
+            raise ValueError("Data must contain a 'volume' column.")
+        last = self.data["volume"].tail(window)
+        ma_next = float(last.mean())
+        return ma_next, last
+
+    def exponential_smoothing(self, alpha: float = 0.3):
+        """Return single-step exponential smoothing forecast and the series."""
+        if "volume" not in self.data.columns:
+            raise ValueError("Data must contain a 'volume' column.")
+        s = self.data["volume"].ewm(alpha=alpha).mean()
+        return float(s.iloc[-1]), s
 
 
 class EnsembleForecaster:
