@@ -1,244 +1,249 @@
-# forecast_system.py
-# Quantitative AI Statistical Forecasting System - Part 1
+# ml_forecast.py
+# Quantitative AI - Machine Learning Forecasting Module (Week 8)
 
-import os
 import warnings
+warnings.filterwarnings("ignore")
 
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 
-from scipy import stats
-from statsmodels.tsa.seasonal import seasonal_decompose
-from sklearn.metrics import mean_absolute_error
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestRegressor
 
-warnings.filterwarnings("ignore")
+# XGBoost is optional
+try:
+    import xgboost as xgb
+    HAS_XGB = True
+except Exception:
+    HAS_XGB = False
 
 
-class VolumeForecaster:
+class MLForecaster:
     """
-    Quantitative AI forecasting system using statistical mathematics.
-    Implements:
-      - Pattern analysis (trend, moments, weekly/monthly patterns)
-      - Moving average forecast
-      - Exponential smoothing
-      - Time series decomposition (trend/seasonal/residual)
-      - Visualizations saved to results/
+    Quantitative ML forecaster for time-series volume forecasting.
+
+    - Engineers numerical features (lags, rolling stats, calendar encodings)
+    - Trains multiple models (Linear Regression, Random Forest, optional XGBoost)
+    - Produces daily forecasts and an ensemble forecast
     """
 
-    def __init__(self, data_path: str):
-        self.data_path = data_path
-        self.df = pd.read_csv(data_path)
-        self.df["date"] = pd.to_datetime(self.df["date"])
-        self.df.set_index("date", inplace=True)
+    def __init__(self, data: pd.DataFrame):
+        self.data = data.copy()
 
-        os.makedirs("results", exist_ok=True)
+        if "date" in self.data.columns:
+            self.data["date"] = pd.to_datetime(self.data["date"])
+            self.data = self.data.set_index("date")
 
-        print("=" * 60)
-        print("📊 STATISTICAL AI FORECASTING SYSTEM (WEEK 7)")
-        print("=" * 60)
-        print(f"Loaded {len(self.df)} numerical data points")
-        print(f"Data dimensions: {self.df.shape}")
-        print("=" * 60)
+        if not isinstance(self.data.index, pd.DatetimeIndex):
+            raise ValueError("Data index must be a DatetimeIndex.")
 
-    def analyze_patterns(self) -> dict:
-        """Perform comprehensive quantitative analysis and identify patterns."""
-        print("\n🔎 QUANTITATIVE PATTERN ANALYSIS...")
+        if "volume" not in self.data.columns:
+            raise ValueError("Data must contain a 'volume' column.")
 
-        x = np.arange(len(self.df))
-        y = self.df["volume"].values
+        self.models = {}
+        self.metrics = {}
+        self.feature_cols = None
 
-        # linear trend slope (units per day)
-        slope, intercept = np.polyfit(x, y, 1)
+        print("\033[91m" + "=" * 70 + "\033[0m")
+        print("\033[97m" + "🧠 QUANTITATIVE ML FORECASTER (Week 8)" + "\033[0m")
+        print("\033[94m" + "=" * 70 + "\033[0m")
 
-        stats_dict = {
-            "mean": float(np.mean(y)),
-            "variance": float(np.var(y)),
-            "std_dev": float(np.std(y, ddof=1)),
-            "skewness": float(stats.skew(y)),
-            "kurtosis": float(stats.kurtosis(y)),
-            "cv": float(np.std(y, ddof=1) / np.mean(y)),
-            "trend_slope": float(slope),
-            "trend_intercept": float(intercept),
-        }
+    def engineer_quantitative_features(self, window: int = 30) -> pd.DataFrame:
+        print(f"\n\033[94m🛠 ENGINEERING FEATURES (window={window})...\033[0m")
+        df = self.data.copy()
 
-        print("Statistical Moments:")
-        print(f"  Mean (μ): {stats_dict['mean']:.2f}")
-        print(f"  Variance (σ²): {stats_dict['variance']:.2f}")
-        print(f"  Std Dev (σ): {stats_dict['std_dev']:.2f}")
-        print(f"  Skewness: {stats_dict['skewness']:.3f}")
-        print(f"  Kurtosis: {stats_dict['kurtosis']:.3f}")
-        print(f"  Coefficient of Variation: {stats_dict['cv']:.3f}")
-        print(f"  Linear Trend (slope): {stats_dict['trend_slope']:.3f} units/day")
+        # Lag features
+        for i in range(1, window + 1):
+            df[f"lag_{i}"] = df["volume"].shift(i)
 
-        # Weekly pattern summary
-        print("\n📅 Numerical Weekly Patterns (mean ± std):")
-        weekly_stats = self.df.groupby(self.df.index.dayofweek)["volume"].agg(["mean", "std"])
-        day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-        weekly_summary = {}
-        for i, day in enumerate(day_names):
-            mean_val = weekly_stats.loc[i, "mean"]
-            std_val = weekly_stats.loc[i, "std"]
-            weekly_summary[day] = (float(mean_val), float(std_val))
-            bar = "█" * int(mean_val / 50)
-            print(f"  {day}: {bar} μ={mean_val:.0f}, σ={std_val:.0f}")
+        # Rolling features
+        df["rolling_mean_7"] = df["volume"].rolling(7).mean()
+        df["rolling_mean_30"] = df["volume"].rolling(30).mean()
+        df["rolling_std_7"] = df["volume"].rolling(7).std()
+        df["rolling_std_30"] = df["volume"].rolling(30).std()
+        df["rolling_min_7"] = df["volume"].rolling(7).min()
+        df["rolling_max_7"] = df["volume"].rolling(7).max()
 
-        # Monthly pattern
-        monthly_avg = self.df.groupby(self.df.index.month)["volume"].mean()
-        monthly_summary = {int(m): float(v) for m, v in monthly_avg.items()}
+        # Transformations
+        df["log_volume"] = np.log1p(df["volume"])
+        df["sqrt_volume"] = np.sqrt(df["volume"].clip(lower=0))
+        df["volume_squared"] = df["volume"] ** 2
 
-        return {
-            "moments": stats_dict,
-            "weekly_summary": weekly_summary,
-            "monthly_summary": monthly_summary,
-        }
+        # Calendar encoding
+        df["day_of_week"] = df.index.dayofweek
+        df["day_of_month"] = df.index.day
+        df["month"] = df.index.month
+        df["quarter"] = df.index.quarter
+        df["year"] = df.index.year
+        df["day_sin"] = np.sin(2 * np.pi * df.index.dayofyear / 365.0)
+        df["day_cos"] = np.cos(2 * np.pi * df.index.dayofyear / 365.0)
 
-    def moving_average_forecast(self, window: int = 7):
-        """Simple moving average forecast and MAE on historical fit."""
-        print(f"\n📈 MOVING AVERAGE FORECAST (window={window})")
+        # Binary indicators
+        df["is_weekend"] = (df["day_of_week"] >= 5).astype(int)
+        df["is_month_end"] = (df["day_of_month"] >= 25).astype(int)
 
-        col = f"MA_{window}"
-        self.df[col] = self.df["volume"].rolling(window=window).mean()
+        # Trend index
+        df["time_index"] = np.arange(len(df))
 
-        # Compare MA shifted to predict each day (y_hat[t] = MA[t-1])
-        actual = self.df["volume"].iloc[window:]
-        pred = self.df[col].shift(1).iloc[window:]
-        mae = mean_absolute_error(actual, pred)
+        df = df.dropna()
 
-        next_forecast = float(self.df[col].iloc[-1])
-        print(f"Next period forecast: {next_forecast:.0f} units")
-        print(f"Historical MAE: {mae:.2f} units")
+        self.feature_cols = [c for c in df.columns if c != "volume"]
 
-        return next_forecast, mae
+        print(f"✓ Engineered {len(self.feature_cols)} features")
+        print(f"✓ Sample size: {len(df)} rows")
+        return df
 
-    def exponential_smoothing(self, alpha: float = 0.3):
-        """Single exponential smoothing and MAE."""
-        print(f"\n📉 EXPONENTIAL SMOOTHING (alpha={alpha})")
+    def train_models(self, test_size: int = 90, feature_window: int = 30):
+        print("\n\033[94m🏋 TRAINING ML MODELS...\033[0m")
+        df = self.engineer_quantitative_features(window=feature_window)
 
-        values = self.df["volume"].values
-        smoothed = [values[0]]
-        for t in range(1, len(values)):
-            smoothed.append(alpha * values[t] + (1 - alpha) * smoothed[-1])
+        X = df[self.feature_cols]
+        y = df["volume"]
 
-        self.df["exp_smooth"] = smoothed
+        if len(df) <= test_size + 10:
+            raise ValueError("Not enough data for train/test split. Reduce test_size or add more data.")
 
-        actual = self.df["volume"].iloc[1:]
-        pred = self.df["exp_smooth"].shift(1).iloc[1:]
-        mae = mean_absolute_error(actual, pred)
+        train_size = len(df) - test_size
+        X_train, X_test = X.iloc[:train_size], X.iloc[train_size:]
+        y_train, y_test = y.iloc[:train_size], y.iloc[train_size:]
 
-        next_forecast = float(self.df["exp_smooth"].iloc[-1])
-        print(f"Next period forecast: {next_forecast:.0f} units")
-        print(f"Historical MAE: {mae:.2f} units")
+        # 1) Linear Regression
+        print("\n📈 Training Linear Regression...")
+        lr = LinearRegression()
+        lr.fit(X_train, y_train)
+        pred_lr = lr.predict(X_test)
+        self.models["linear"] = lr
+        self.metrics["linear"] = self._calc_metrics(y_test, pred_lr)
 
-        return next_forecast, mae
-
-    def decompose_time_series(self):
-        """Decompose time series into trend/seasonal/residual components."""
-        print("\n🧩 DECOMPOSING TIME SERIES...")
-        decomposition = seasonal_decompose(self.df["volume"], model="additive", period=365)
-
-        self.df["trend"] = decomposition.trend
-        self.df["seasonal"] = decomposition.seasonal
-        self.df["residual"] = decomposition.resid
-
-        print("Components extracted:")
-        print("  ✓ Trend (long-term direction)")
-        print("  ✓ Seasonal (recurring patterns)")
-        print("  ✓ Residual (random variation)")
-
-        return decomposition
-
-    def create_visualizations(self, window: int = 7):
-        """Create and save required visualizations."""
-        print("\n🖼️ CREATING VISUALIZATIONS...")
-
-        os.makedirs("results", exist_ok=True)
-
-        fig, axes = plt.subplots(3, 1, figsize=(12, 10))
-        fig.patch.set_facecolor("white")
-
-        # Plot 1: Historical + MA
-        axes[0].plot(self.df.index, self.df["volume"], label="Actual", alpha=0.6)
-        ma_col = f"MA_{window}"
-        if ma_col in self.df.columns:
-            axes[0].plot(self.df.index, self.df[ma_col], label=f"{window}-Day MA", linewidth=2)
-        axes[0].set_title("Historical Volume Data")
-        axes[0].set_ylabel("Volume")
-        axes[0].legend()
-        axes[0].grid(True, alpha=0.3)
-
-        # Plot 2: Average volume by day of week
-        weekly_avg = self.df.groupby(self.df.index.dayofweek)["volume"].mean()
-        day_labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-        axes[1].bar(day_labels, weekly_avg.values)
-        axes[1].set_title("Average Volume by Day of Week")
-        axes[1].set_ylabel("Average Volume")
-        axes[1].grid(True, alpha=0.3, axis="y")
-
-        for i, v in enumerate(weekly_avg.values):
-            axes[1].text(i, v, f"{v:.0f}", ha="center", va="bottom")
-
-        # Plot 3: Average volume by month
-        monthly_avg = self.df.groupby(self.df.index.month)["volume"].mean()
-        month_labels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-        axes[2].plot(month_labels, monthly_avg.values, marker="o", linewidth=2)
-        axes[2].set_title("Average Volume by Month")
-        axes[2].set_ylabel("Average Volume")
-        axes[2].set_xlabel("Month")
-        axes[2].grid(True, alpha=0.3)
-
-        plt.tight_layout()
-        out_path = os.path.join("results", "volume_analysis.png")
-        plt.savefig(out_path, dpi=120, bbox_inches="tight")
-        plt.close(fig)
-
-        print(f"✅ Saved visualization to {out_path}")
-        return out_path
-
-
-def main():
-    # Ensure folders exist
-    os.makedirs("data", exist_ok=True)
-    os.makedirs("results", exist_ok=True)
-
-    data_path = os.path.join("data", "historical_volumes.csv")
-    if not os.path.exists(data_path):
-        raise FileNotFoundError(
-            "Missing data/historical_volumes.csv. Run: python data_generator.py first."
+        # 2) Random Forest
+        print("\n🌲 Training Random Forest...")
+        rf = RandomForestRegressor(
+            n_estimators=200,
+            max_depth=12,
+            random_state=42,
+            n_jobs=-1
         )
+        rf.fit(X_train, y_train)
+        pred_rf = rf.predict(X_test)
+        self.models["rf"] = rf
+        self.metrics["rf"] = self._calc_metrics(y_test, pred_rf)
 
-    forecaster = VolumeForecaster(data_path)
+        # 3) XGBoost (optional)
+        if HAS_XGB:
+            print("\n🚀 Training XGBoost...")
+            xg = xgb.XGBRegressor(
+                n_estimators=300,
+                max_depth=6,
+                learning_rate=0.08,
+                subsample=0.9,
+                colsample_bytree=0.9,
+                random_state=42
+            )
+            xg.fit(X_train, y_train)
+            pred_xg = xg.predict(X_test)
+            self.models["xgb"] = xg
+            self.metrics["xgb"] = self._calc_metrics(y_test, pred_xg)
+        else:
+            print("\n⚠ XGBoost not installed. Skipping XGBoost model.")
+            print("   (Optional install: pip install xgboost)")
 
-    patterns = forecaster.analyze_patterns()
-    ma_forecast, ma_error = forecaster.moving_average_forecast(window=7)
-    exp_forecast, exp_error = forecaster.exponential_smoothing(alpha=0.3)
-    forecaster.decompose_time_series()
-    plot_path = forecaster.create_visualizations(window=7)
+        # Top features from RF
+        print("\n\033[92m🔍 TOP 5 IMPORTANT FEATURES (Random Forest)\033[0m")
+        importances = pd.Series(self.models["rf"].feature_importances_, index=self.feature_cols).sort_values(ascending=False)
+        for feat, val in importances.head(5).items():
+            bar = "█" * int(val * 50)
+            print(f"{feat:22s} {bar} {val:.4f}")
 
-    # Save a short progress log for “proof”
-    progress_path = os.path.join("results", "analysis_summary.txt")
-    with open(progress_path, "w", encoding="utf-8") as f:
-        f.write("WEEK 7 ANALYSIS SUMMARY\n")
-        f.write("=" * 60 + "\n")
-        f.write(f"Moving Average (7-day) forecast: {ma_forecast:.0f}\n")
-        f.write(f"Moving Average MAE: {ma_error:.2f}\n")
-        f.write(f"Exp Smoothing forecast (alpha=0.3): {exp_forecast:.0f}\n")
-        f.write(f"Exp Smoothing MAE: {exp_error:.2f}\n")
-        f.write(f"Visualization: {plot_path}\n")
-        f.write("\nMoments:\n")
-        for k, v in patterns["moments"].items():
-            f.write(f"  {k}: {v}\n")
+        return self.models
 
-    print("\n" + "=" * 60)
-    print("✅ ANALYSIS COMPLETE!")
-    print("=" * 60)
-    print(f"Moving Average (7-day): {ma_forecast:.0f} units | MAE={ma_error:.2f}")
-    print(f"Exponential Smoothing: {exp_forecast:.0f} units | MAE={exp_error:.2f}")
-    print(f"Saved: {plot_path}")
-    print(f"Saved: {progress_path}")
+    def forecast_future(self, periods: int = 13 * 30, feature_window: int = 30) -> pd.DataFrame:
+        if not self.models:
+            raise RuntimeError("No trained models. Run train_models() first.")
 
-    return 0
+        print(f"\n\033[95m📅 GENERATING {periods}-DAY FORECAST (~13 months)...\033[0m")
 
+        # Ensure features computed so feature_cols exist
+        _ = self.engineer_quantitative_features(window=feature_window)
+        last_date = self.data.index.max()
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+        # Rolling history for lag features
+        history = self.data["volume"].copy()
+
+        model_names = list(self.models.keys())
+        forecasts = {m: [] for m in model_names}
+        dates = []
+
+        # time_index should continue beyond observed length
+        time_index_base = len(self.data)
+
+        for i in range(1, periods + 1):
+            future_date = last_date + pd.Timedelta(days=i)
+            dates.append(future_date)
+
+            feat = {}
+
+            # Lags
+            for lag in range(1, feature_window + 1):
+                feat[f"lag_{lag}"] = float(history.iloc[-lag])
+
+            # Rolling stats
+            last_7 = history.iloc[-7:]
+            last_30 = history.iloc[-30:]
+            feat["rolling_mean_7"] = float(last_7.mean())
+            feat["rolling_mean_30"] = float(last_30.mean())
+            feat["rolling_std_7"] = float(last_7.std(ddof=0))
+            feat["rolling_std_30"] = float(last_30.std(ddof=0))
+            feat["rolling_min_7"] = float(last_7.min())
+            feat["rolling_max_7"] = float(last_7.max())
+
+            # Transformations based on last known volume
+            last_vol = float(history.iloc[-1])
+            feat["log_volume"] = float(np.log1p(max(last_vol, 0.0)))
+            feat["sqrt_volume"] = float(np.sqrt(max(last_vol, 0.0)))
+            feat["volume_squared"] = float(last_vol ** 2)
+
+            # Calendar
+            feat["day_of_week"] = future_date.dayofweek
+            feat["day_of_month"] = future_date.day
+            feat["month"] = future_date.month
+            feat["quarter"] = ((future_date.month - 1) // 3) + 1
+            feat["year"] = future_date.year
+            doy = future_date.timetuple().tm_yday
+            feat["day_sin"] = float(np.sin(2 * np.pi * doy / 365.0))
+            feat["day_cos"] = float(np.cos(2 * np.pi * doy / 365.0))
+
+            feat["is_weekend"] = 1 if feat["day_of_week"] >= 5 else 0
+            feat["is_month_end"] = 1 if feat["day_of_month"] >= 25 else 0
+
+            feat["time_index"] = time_index_base + i
+
+            X_future = pd.DataFrame([feat])[self.feature_cols]
+
+            preds = []
+            for name, model in self.models.items():
+                p = float(model.predict(X_future)[0])
+                p = max(p, 0.0)
+                forecasts[name].append(p)
+                preds.append(p)
+
+            # feedback uses mean prediction
+            ensemble_pred = float(np.mean(preds))
+            history = pd.concat([history, pd.Series([ensemble_pred], index=[future_date])])
+
+        out = pd.DataFrame({"date": dates})
+        for name, vals in forecasts.items():
+            out[name] = vals
+
+        out["ensemble"] = out[[c for c in forecasts.keys()]].mean(axis=1)
+        return out
+
+    @staticmethod
+    def _calc_metrics(y_true, y_pred):
+        mae = float(mean_absolute_error(y_true, y_pred))
+        rmse = float(np.sqrt(mean_squared_error(y_true, y_pred)))
+        r2 = float(r2_score(y_true, y_pred))
+        print(f"   MAE:  {mae:.2f}")
+        print(f"   RMSE: {rmse:.2f}")
+        print(f"   R²:   {r2:.4f}")
+        return {"mae": mae, "rmse": rmse, "r2": r2}
